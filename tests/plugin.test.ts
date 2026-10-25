@@ -71,3 +71,48 @@ test('paused researcher is never resumed or assigned; prepared sources stay dura
   assert.ok(await h.ctx.issues.documents.get(issue.id, 'plan', companyId));
   assert.equal((await plugin.onHealth!()).status, 'degraded');
 });
+test('poll and health skip companies that never stored this plugin config, but still report real config failures', async () => {
+  const other = '22222222-2222-4222-8222-222222222222';
+  const h = fixture(); h.seed({ companies: [{ id: other, name: 'other', status: 'active' } as any] });
+  const denied = () => { throw new Error('Plugin "feed-watch" is not allowed to perform "config.get": company context is required'); };
+  const realGet = h.ctx.config.get.bind(h.ctx.config);
+  h.ctx.config.get = (async (id?: string) => id === other ? denied() : realGet(id)) as typeof h.ctx.config.get;
+  const plugin = createPlugin().definition; await plugin.setup(h.ctx);
+  await h.runJob('poll');
+  assert.equal((await plugin.onHealth!()).status, 'ok');
+  h.ctx.config.get = (async (id?: string) => { if (id === other) throw new Error('host unavailable'); return realGet(id); }) as typeof h.ctx.config.get;
+  await assert.rejects(h.runJob('poll'), /company intakes failed/);
+  assert.equal((await plugin.onHealth!()).status, 'degraded');
+});
+test('health reports its own config-read failure without a poll, and drops a stale error once the company is unconfigured', async () => {
+  const other = '22222222-2222-4222-8222-222222222222';
+  const h = fixture(); h.seed({ companies: [{ id: other, name: 'other', status: 'active' } as any] });
+  const realGet = h.ctx.config.get.bind(h.ctx.config);
+  let mode: 'down' | 'unconfigured' = 'down';
+  h.ctx.config.get = (async (id?: string) => {
+    if (id !== other) return realGet(id);
+    throw new Error(mode === 'down' ? 'host unavailable' : 'Plugin "feed-watch" is not allowed to perform "config.get": company context is required');
+  }) as typeof h.ctx.config.get;
+  const plugin = createPlugin().definition; await plugin.setup(h.ctx);
+  assert.equal((await plugin.onHealth!()).status, 'degraded'); // No poll ran: health found the failure itself.
+  mode = 'unconfigured';
+  assert.equal((await plugin.onHealth!()).status, 'ok'); // The stale entry is gone without waiting for a poll.
+});
+test('a poll error clears once the company is unconfigured, and an unresolved poll error still degrades health', async () => {
+  const other = '22222222-2222-4222-8222-222222222222';
+  const h = fixture(); h.seed({ companies: [{ id: other, name: 'other', status: 'active' } as any] });
+  const realGet = h.ctx.config.get.bind(h.ctx.config);
+  let mode: 'down' | 'empty' | 'unconfigured' = 'down';
+  h.ctx.config.get = (async (id?: string) => {
+    if (id !== other) return realGet(id);
+    if (mode === 'empty') return {};
+    throw new Error(mode === 'down' ? 'host unavailable' : 'Plugin "feed-watch" is not allowed to perform "config.get": company context is required');
+  }) as typeof h.ctx.config.get;
+  const plugin = createPlugin().definition; await plugin.setup(h.ctx);
+  await assert.rejects(h.runJob('poll'), /company intakes failed/);
+  mode = 'empty'; // Health now reads a valid, disabled config, so only the recorded poll error can degrade it.
+  assert.equal((await plugin.onHealth!()).status, 'degraded');
+  mode = 'unconfigured';
+  await h.runJob('poll'); // The skip clears the old poll error, so this poll succeeds.
+  assert.equal((await plugin.onHealth!()).status, 'ok');
+});
