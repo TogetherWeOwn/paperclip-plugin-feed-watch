@@ -1,0 +1,17 @@
+{
+  // Template only: namespace, tenant and URL placeholders must be replaced
+  // through a separately reviewed deployment. This change does NOT deploy.
+  "name": "paperclip-feed-watch",
+  "main": "../dist/cloudflare.js",
+  "compatibility_date": "2026-10-25",
+  "workers_dev": true,
+  "vars": {
+    "ENABLED": "false",
+    "CHANNEL_ID": "UCLKPca3kwwd-B59HNr-_lvA",
+    "COMPANY_ID": "CONFIGURE_COMPANY_UUID",
+    "CALLBACK_URL": "https://CONFIGURE.example/websub"
+  },
+  "kv_namespaces": [{ "binding": "INBOX", "id": "CONFIGURE_KV_NAMESPACE" }]
+  // No cron triggers. SHARED_SECRET and HUB_SECRET are secret bindings,
+  // not values stored in this file. Optional PLUGIN_WEBHOOK_URL is a var.
+}
