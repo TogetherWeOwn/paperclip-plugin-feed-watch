@@ -71,3 +71,16 @@ test('paused researcher is never resumed or assigned; prepared sources stay dura
   assert.ok(await h.ctx.issues.documents.get(issue.id, 'plan', companyId));
   assert.equal((await plugin.onHealth!()).status, 'degraded');
 });
+test('poll and health skip companies that never stored this plugin config, but still report real config failures', async () => {
+  const other = '22222222-2222-4222-8222-222222222222';
+  const h = fixture(); h.seed({ companies: [{ id: other, name: 'other', status: 'active' } as any] });
+  const denied = () => { throw new Error('Plugin "feed-watch" is not allowed to perform "config.get": company context is required'); };
+  const realGet = h.ctx.config.get.bind(h.ctx.config);
+  h.ctx.config.get = (async (id?: string) => id === other ? denied() : realGet(id)) as typeof h.ctx.config.get;
+  const plugin = createPlugin().definition; await plugin.setup(h.ctx);
+  await h.runJob('poll');
+  assert.equal((await plugin.onHealth!()).status, 'ok');
+  h.ctx.config.get = (async (id?: string) => { if (id === other) throw new Error('host unavailable'); return realGet(id); }) as typeof h.ctx.config.get;
+  await assert.rejects(h.runJob('poll'), /company intakes failed/);
+  assert.equal((await plugin.onHealth!()).status, 'degraded');
+});
