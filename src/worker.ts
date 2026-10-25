@@ -59,12 +59,12 @@ export function createPlugin() {
     },
     async onHealth() {
       const summaries: Record<string, unknown> = {};
-      let degraded = Object.keys(invocationErrors).length > 0;
+      let degraded = false;
       for (const company of await companies()) {
         let raw: unknown;
         try { raw = await ctx.config.get(company.id); }
         catch (error) {
-          if (unconfigured(error)) continue;
+          if (unconfigured(error)) { delete invocationErrors[company.id]; continue; }
           degraded = true; invocationErrors[company.id] = 'configuration-or-health-failed'; continue;
         }
         try {
@@ -82,6 +82,9 @@ export function createPlugin() {
           degraded ||= stale || blocked > 0 || Object.keys(state.degraded).length > 0;
         } catch { degraded = true; invocationErrors[company.id] = 'configuration-or-health-failed'; }
       }
+      // Errors recorded by an earlier poll or health check still count, unless the
+      // company was skipped above, which cleared its entry.
+      degraded ||= Object.keys(invocationErrors).length > 0;
       return { status: degraded ? 'degraded' : 'ok', message: Object.keys(summaries).length ? 'Feed intake status (research completion is tracked by native issues)' : 'Intake disabled; no external work scheduled', details: { companies: summaries, invocationErrors } };
     },
   });
