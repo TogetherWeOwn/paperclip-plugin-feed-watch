@@ -56,8 +56,9 @@ export async function createProvider(options: ProviderOptions) {
       const response = await fetcher(url, { ...init, redirect: 'error', signal: AbortSignal.timeout(20_000), dispatcher } as RequestInit & { dispatcher: ProxyAgent });
       if (response.status === 429 || response.status === 403) {
         control.blockedUntil = clock() + 21_600_000;
-        await response.body?.cancel();
         await persist();
+        // An errored body can reject cancellation; never lose the durable block.
+        try { await response.body?.cancel(); } catch { /* Best-effort cleanup only. */ }
         throw new ProviderError('upstream-unavailable', 502);
       }
       return readLimited(response, 4_194_304);
