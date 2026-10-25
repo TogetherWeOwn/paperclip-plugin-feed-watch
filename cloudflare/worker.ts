@@ -39,7 +39,7 @@ async function transcript(env: Env, id: string, fetcher: typeof fetch, now: numb
   control.last = now; control.count++;
   await env.INBOX.put(controlKey, JSON.stringify(control));
   const fetchText = async (url: string, init?: RequestInit) => {
-    const response = await fetcher(url, { ...init, redirect: 'error', signal: AbortSignal.timeout(20_000) });
+    const response = await fetcher(url, { ...init, redirect: 'manual', signal: AbortSignal.timeout(20_000) });
     if (response.status === 429 || response.status === 403) {
       control.blockedUntil = now + 21_600_000;
       // A second write to controlKey in this same second would violate KV's
@@ -102,7 +102,7 @@ export async function handleRequest(request: Request, env: Env, fetcher: typeof 
             const target = publicHttps(env.PLUGIN_WEBHOOK_URL);
             if (!/^\/api\/plugins\/[^/]+\/webhooks\/youtube$/.test(target.pathname)) throw new Error('invalid-plugin-webhook');
             const payload = JSON.stringify({ companyId: env.COMPANY_ID, channelId: env.CHANNEL_ID, eventId: id, entries });
-            const response = await fetcher(target.href, { method: 'POST', redirect: 'error', signal: AbortSignal.timeout(8000),
+            const response = await fetcher(target.href, { method: 'POST', redirect: 'manual', signal: AbortSignal.timeout(8000),
               headers: await signedHeaders(env.SHARED_SECRET, 'POST', PLUGIN_PUSH_PATH, payload, now), body: payload });
             if (response.ok) await acknowledge(env, id);
           } catch { /* Durable inbox pull retries without a Worker cron. */ }
@@ -128,7 +128,9 @@ export async function handleRequest(request: Request, env: Env, fetcher: typeof 
       }
       const verifiedCallback = new URL(env.CALLBACK_URL); verifiedCallback.searchParams.set('verify', verificationToken);
       await env.INBOX.put(stateKey(env, 'pending'), JSON.stringify({ topic: topicFor(env), mode: 'subscribe', expiresAt: now + 600_000, verificationToken } satisfies Pending));
-      const response = await fetcher('https://pubsubhubbub.appspot.com/subscribe', { method: 'POST', redirect: 'error', signal: AbortSignal.timeout(15_000),
+      // Workers rejects redirect: 'error' before sending anything. Manual mode
+      // plus the non-2xx check below also refuses redirects without leaking secrets.
+      const response = await fetcher('https://pubsubhubbub.appspot.com/subscribe', { method: 'POST', redirect: 'manual', signal: AbortSignal.timeout(15_000),
         headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ 'hub.mode': 'subscribe', 'hub.topic': topicFor(env), 'hub.callback': verifiedCallback.href, 'hub.lease_seconds': '86400', 'hub.secret': env.HUB_SECRET }) });
       if (!response.ok) throw new Error('hub-request-failed');
       return json({ pending: true }, 202);
