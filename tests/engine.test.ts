@@ -229,3 +229,27 @@ test('an explicit bootstrap boundary within the feed establishes a safe initial 
   assert.equal((await f.engine().status()).lastSeen, video);
   assert.equal((await f.engine().status()).degraded.gap, undefined);
 });
+test('pull-path inbox: an event is durably saved before it is acknowledged, and never acknowledged when the save fails', async () => {
+  const f = fixture();
+  const event = { id: 'evt-1', entries: parseFeed(atom(), channel) };
+  f.io.rss = async () => [];
+  f.io.inbox = async () => [event];
+  const acked: string[] = [];
+  f.io.acknowledge = async (id: string) => {
+    assert.ok(JSON.stringify([...f.states.values()]).includes(video), 'video must be in durable state before ack');
+    acked.push(id);
+  };
+  await f.engine().tick();
+  assert.deepEqual(acked, ['evt-1']);
+
+  const g = fixture();
+  g.io.rss = async () => [];
+  g.io.inbox = async () => [event];
+  const gAcked: string[] = [];
+  g.io.acknowledge = async (id: string) => { gAcked.push(id); };
+  const set = g.ctx.state.set;
+  (g.ctx.state as any).set = async () => { throw new Error('store down'); };
+  await g.engine().tick().catch(() => {}); // the job may fail loudly; what matters is the inbox event stays unacknowledged
+  (g.ctx.state as any).set = set;
+  assert.deepEqual(gAcked, [], 'a failed durable save must leave the event unacknowledged in the inbox');
+});
