@@ -73,7 +73,7 @@ test('Worker transcript path authenticates, verifies channel, preserves full raw
       { languageCode: 'en', kind: 'asr', baseUrl: 'https://www.youtube.com/api/timedtext?kind=asr' },
       { languageCode: 'en', baseUrl: 'https://www.youtube.com/api/timedtext?kind=manual' },
     ] } } }); }
-    assert.ok(String(url).includes('kind=manual')); assert.equal(init?.redirect, 'error');
+    assert.ok(String(url).includes('kind=manual')); assert.equal(init?.redirect, 'manual');
     return new Response(raw);
   });
   assert.equal(response.status, 200);
@@ -190,4 +190,68 @@ test('verification capability remains secret and stable so renewal addresses the
     assert.equal((await handleRequest(new Request(callback), f.env, fetch, () => now)).status, 200);
   }
   assert.equal(callbacks[0], callbacks[1]);
+});
+
+test('subscription reaches an edge-compatible fetch only after durable pending intent', async () => {
+  const f = fixture(); let requests = 0;
+  const response = await f.call('/subscription', 'POST', {}, async (url, init) => {
+    // workerd rejects redirect: error before sending a request; Node fetch does not.
+    assert.equal(init?.redirect, 'manual');
+    requests++;
+    assert.equal(String(url), 'https://pubsubhubbub.appspot.com/subscribe');
+    assert.equal(new Headers(init?.headers).get('content-type'), 'application/x-www-form-urlencoded');
+    const form = new URLSearchParams(String(init?.body));
+    const pending = JSON.parse(f.values.get(`state:${channel}:pending`)!);
+    assert.equal(pending.topic, form.get('hub.topic'));
+    assert.equal(pending.mode, 'subscribe');
+    assert.equal(pending.expiresAt, now + 600_000);
+    assert.equal(new URL(form.get('hub.callback')!).searchParams.get('verify'), pending.verificationToken);
+    assert.equal(form.get('hub.secret'), f.env.HUB_SECRET);
+    return new Response('', { status: 202 });
+  });
+  assert.equal(response.status, 202);
+  assert.equal(requests, 1);
+  const duplicate = await f.call('/subscription', 'POST', {}, async () => { requests++; throw new Error('duplicate-request'); });
+  assert.equal(duplicate.status, 202);
+  assert.equal(requests, 1, 'an unexpired pending intent must suppress resubmission');
+});
+
+test('manual hub redirects and other non-2xx responses fail closed without following or granting a lease', async () => {
+  for (const status of [301, 302, 303, 307, 308, 400, 503]) {
+    const f = fixture(); let requests = 0;
+    const response = await f.call('/subscription', 'POST', {}, async (_url, init) => {
+      assert.equal(init?.redirect, 'manual'); requests++;
+      return new Response('', { status, headers: { location: 'https://untrusted.example/collect' } });
+    });
+    assert.equal(response.status, 503);
+    assert.equal(requests, 1);
+    const state = await (await f.call('/status')).json() as any;
+    assert.equal(state.lease, null);
+    assert.equal(state.pending.mode, 'subscribe');
+    assert.equal(state.pending.expiresAt, now + 600_000);
+  }
+});
+
+test('caption redirects fail closed with the edge-supported manual mode', async () => {
+  const f = fixture(); let requests = 0;
+  const response = await f.call('/transcript', 'POST', { videoId: video, channelId: channel }, async (_url, init) => {
+    assert.equal(init?.redirect, 'manual'); requests++;
+    return new Response('', { status: 307, headers: { location: 'https://untrusted.example/collect' } });
+  });
+  assert.equal(response.status, 503);
+  assert.equal(requests, 1);
+});
+
+test('manual forwarding redirects preserve the signed durable event for pull retry', async () => {
+  const f = fixture(); let requests = 0;
+  f.env.PLUGIN_WEBHOOK_URL = 'https://paperclip.example/api/plugins/test/webhooks/youtube';
+  const body = atom();
+  const response = await handleRequest(new Request('https://worker.example/websub', { method: 'POST', body,
+    headers: { 'x-hub-signature': await sign(f.env.HUB_SECRET!, body) } }), f.env, async (_url, init) => {
+    assert.equal(init?.redirect, 'manual'); requests++;
+    return new Response('', { status: 302, headers: { location: 'https://untrusted.example/collect' } });
+  }, () => now);
+  assert.equal(response.status, 202);
+  assert.equal(requests, 1);
+  assert.equal(((await (await f.call('/inbox')).json()) as any).events.length, 1);
 });
