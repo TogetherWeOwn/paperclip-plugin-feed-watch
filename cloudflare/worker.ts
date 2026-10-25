@@ -21,7 +21,7 @@ function publicHttps(value: string) {
   return url;
 }
 type Lease = { confirmedAt: number; leaseSeconds: number; expiresAt: number; renewAt: number };
-type Pending = { topic: string; mode: 'subscribe'; expiresAt: number };
+type Pending = { topic: string; mode: 'subscribe'; expiresAt: number; verificationToken: string };
 async function acknowledge(env: Env, id: string) {
   // Keep a receipt for redelivery/consistency races. No unacknowledged event TTL.
   await env.INBOX.put(ackKey(env, id), '1', { expirationTtl: 2_592_000 });
@@ -34,14 +34,18 @@ async function transcript(env: Env, id: string, fetcher: typeof fetch, now: numb
   const day = new Date(now).toISOString().slice(0, 10);
   const control = await stored<{ day: string; count: number; last: number; blockedUntil: number }>(env, controlKey) ?? { day, count: 0, last: 0, blockedUntil: 0 };
   if (control.day !== day) { control.day = day; control.count = 0; }
-  if (control.blockedUntil > now || now - control.last < 60_000 || control.count >= 96) throw new Error('caption-cooldown');
+  const blockedUntil = await stored<number>(env, stateKey(env, 'caption-cooldown')) ?? 0;
+  if (Math.max(control.blockedUntil, blockedUntil) > now || now - control.last < 60_000 || control.count >= 96) throw new Error('caption-cooldown');
   control.last = now; control.count++;
   await env.INBOX.put(controlKey, JSON.stringify(control));
   const fetchText = async (url: string, init?: RequestInit) => {
     const response = await fetcher(url, { ...init, redirect: 'error', signal: AbortSignal.timeout(20_000) });
     if (response.status === 429 || response.status === 403) {
       control.blockedUntil = now + 21_600_000;
-      await env.INBOX.put(controlKey, JSON.stringify(control));
+      // A second write to controlKey in this same second would violate KV's
+      // per-key write limit and lose the cooldown. This key is written only
+      // on a block, and no further acquisition runs while it is active.
+      await env.INBOX.put(stateKey(env, 'caption-cooldown'), JSON.stringify(control.blockedUntil));
     }
     return readLimited(response, 4_194_304);
   };
@@ -78,7 +82,7 @@ export async function handleRequest(request: Request, env: Env, fetcher: typeof 
       const pending = await stored<Pending>(env, stateKey(env, 'pending'));
       const mode = url.searchParams.get('hub.mode'), topic = url.searchParams.get('hub.topic'), challenge = url.searchParams.get('hub.challenge');
       const seconds = url.searchParams.get('hub.lease_seconds');
-      if (!pending || pending.expiresAt <= now || mode !== pending.mode || topic !== pending.topic || topic !== topicFor(env) || !challenge || challenge.length > 4096 || !seconds || !/^\d+$/.test(seconds) || Number(seconds) < 60 || Number(seconds) > 31_536_000) return json({ error: 'not-found' }, 404);
+      if (!pending?.verificationToken || url.searchParams.get('verify') !== pending.verificationToken || pending.expiresAt <= now || mode !== pending.mode || topic !== pending.topic || topic !== topicFor(env) || !challenge || challenge.length > 4096 || !seconds || !/^\d+$/.test(seconds) || Number(seconds) < 60 || Number(seconds) > 31_536_000) return json({ error: 'not-found' }, 404);
       const leaseSeconds = Number(seconds);
       await env.INBOX.put(stateKey(env, 'lease'), JSON.stringify({ confirmedAt: now, leaseSeconds, expiresAt: now + leaseSeconds * 1000, renewAt: now + leaseSeconds * 800 } satisfies Lease));
       await env.INBOX.delete(stateKey(env, 'pending'));
@@ -109,13 +113,23 @@ export async function handleRequest(request: Request, env: Env, fetcher: typeof 
     const body = request.method === 'GET' ? '' : await readLimited(new Response(request.body), 32_768);
     try { await authenticate(env.SHARED_SECRET, request.method, url.pathname + url.search, body, request.headers, now); }
     catch { return json({ error: 'unauthorized' }, 401); }
-    if (url.pathname === '/status' && request.method === 'GET') return json({ lease: await stored(env, stateKey(env, 'lease')), pending: await stored(env, stateKey(env, 'pending')) });
+    if (url.pathname === '/status' && request.method === 'GET') {
+      const pending = await stored<Pending>(env, stateKey(env, 'pending'));
+      // The verification capability must not enter plugin health/delivery logs.
+      return json({ lease: await stored(env, stateKey(env, 'lease')), pending: pending ? { topic: pending.topic, mode: pending.mode, expiresAt: pending.expiresAt } : null });
+    }
     if (url.pathname === '/subscription' && request.method === 'POST') {
       const pending = await stored<Pending>(env, stateKey(env, 'pending'));
       if (pending && pending.expiresAt > now) return json({ pending: true }, 202);
-      await env.INBOX.put(stateKey(env, 'pending'), JSON.stringify({ topic: topicFor(env), mode: 'subscribe', expiresAt: now + 600_000 } satisfies Pending));
+      let verificationToken = await stored<string>(env, stateKey(env, 'verification-token'));
+      if (!verificationToken) {
+        verificationToken = crypto.randomUUID();
+        await env.INBOX.put(stateKey(env, 'verification-token'), JSON.stringify(verificationToken));
+      }
+      const verifiedCallback = new URL(env.CALLBACK_URL); verifiedCallback.searchParams.set('verify', verificationToken);
+      await env.INBOX.put(stateKey(env, 'pending'), JSON.stringify({ topic: topicFor(env), mode: 'subscribe', expiresAt: now + 600_000, verificationToken } satisfies Pending));
       const response = await fetcher('https://pubsubhubbub.appspot.com/subscribe', { method: 'POST', redirect: 'error', signal: AbortSignal.timeout(15_000),
-        headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ 'hub.mode': 'subscribe', 'hub.topic': topicFor(env), 'hub.callback': env.CALLBACK_URL, 'hub.lease_seconds': '86400', 'hub.secret': env.HUB_SECRET }) });
+        headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ 'hub.mode': 'subscribe', 'hub.topic': topicFor(env), 'hub.callback': verifiedCallback.href, 'hub.lease_seconds': '86400', 'hub.secret': env.HUB_SECRET }) });
       if (!response.ok) throw new Error('hub-request-failed');
       return json({ pending: true }, 202);
     }

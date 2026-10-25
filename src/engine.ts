@@ -2,7 +2,7 @@ import type { PluginContext } from '@paperclipai/plugin-sdk';
 import type { Config } from './config.ts';
 import { entrySchema, type Entry, type Segment } from './feed.ts';
 import { digest } from './crypto.ts';
-import { researchPlan } from './instructions.ts';
+import { researchPlan, untrustedDocument } from './instructions.ts';
 export const PLUGIN_ID = 'togetherweown.feed-watch';
 export type Transcript = { videoId: string; raw: string; segments: Segment[]; language: string; source: 'youtube-captions'; retrievedAt: string };
 export interface Transport {
@@ -15,7 +15,7 @@ export interface Transport {
 }
 type Video = {
   entry: Entry; stage: 'discovered' | 'caption-pending' | 'caption-blocked' | 'transcript-ready' | 'research-pending';
-  discoveredAt: number; captionAttempts: number; retryAt: number; error?: string;
+  discoveredAt: number; lastAttemptAt?: number; captionAttempts: number; retryAt: number; error?: string;
   issueId?: string; createAttempted?: boolean; transcriptHash?: string; preparedEntry?: Entry;
   appliedRetryNonce?: string;
 };
@@ -43,7 +43,9 @@ export class FeedWatch {
   }
   private key(stateKey: string) { return { scopeKind: 'company' as const, scopeId: this.companyId, namespace: PLUGIN_ID, stateKey: `${this.config.channelId}:${stateKey}` }; }
   async status(): Promise<ChannelState> {
-    return await this.ctx.state.get(this.key('channel')) as ChannelState | null ?? { videos: {}, degraded: {}, lastSeen: this.config.initialLastSeen };
+    const state = await this.ctx.state.get(this.key('channel')) as ChannelState | null ?? { videos: {}, degraded: {} };
+    state.lastSeen ??= this.config.initialLastSeen;
+    return state;
   }
   private save(state: ChannelState) { return this.ctx.state.set(this.key('channel'), state); }
   private discover(state: ChannelState, entries: Entry[]) {
@@ -83,7 +85,12 @@ export class FeedWatch {
         if (state.lastSeen && !feed.some(entry => entry.videoId === state.lastSeen)) {
           try { this.discover(state, await this.io.recoverGap(state.lastSeen)); delete state.degraded.gap; }
           catch (error) { state.degraded.gap = safeError(error, 'gap-recovery-failed'); reconciled = false; }
-        }
+        } else if (!state.lastSeen && feed.length && feed.every(entry => Date.parse(entry.published) > Date.parse(this.config.publishedAfter!))) {
+          // A truncated RSS tail cannot prove that older in-scope videos were
+          // handled. Keep bootstrap open until a corpus marker is supplied or
+          // the explicit boundary is covered by the feed.
+          state.degraded.gap = 'bootstrap-coverage-unverified'; reconciled = false;
+        } else if (feed.length) delete state.degraded.gap;
         if (feed.length && reconciled) state.lastSeen = feed[0].videoId;
         state.lastCheckAt = this.now(); delete state.degraded.rss;
       } catch { state.degraded.rss = 'rss-reconciliation-failed'; }
@@ -96,9 +103,9 @@ export class FeedWatch {
         }
       }
       const pending = Object.values(state.videos).filter(record => record.stage !== 'research-pending' && record.stage !== 'caption-blocked' && record.retryAt <= this.now())
-        .sort((a,b) => Date.parse(a.entry.published) - Date.parse(b.entry.published)).slice(0, this.config.maxVideosPerTick);
+        .sort((a,b) => (a.lastAttemptAt ?? 0) - (b.lastAttemptAt ?? 0) || Date.parse(a.entry.published) - Date.parse(b.entry.published)).slice(0, this.config.maxVideosPerTick);
       for (const record of pending) {
-        try { await this.prepare(state, record); }
+        try { record.lastAttemptAt = this.now(); await this.save(state); await this.prepare(state, record); }
         catch (error) { record.error = safeError(error, 'preparation-failed'); record.retryAt = this.now() + 900_000; await this.save(state); }
       }
       await this.save(state);
@@ -157,13 +164,19 @@ export class FeedWatch {
     const documents: { key: string; body: string }[] = [];
     const addParts = (prefix: string, body: string) => {
       // Source is never truncated. Stay well below Paperclip's 524288-char cap.
-      for (let offset = 0, part = 1; offset < body.length; offset += 180_000, part++) documents.push({ key: `${prefix}-${hash.slice(0, 16)}-${String(part).padStart(4, '0')}`, body: body.slice(offset, offset + 180_000) });
+      for (let offset = 0, part = 1; offset < body.length; part++) {
+        let end = Math.min(offset + 120_000, body.length);
+        // Never hand UTF-8 storage an isolated half of a surrogate pair.
+        if (end < body.length && /[\uD800-\uDBFF]/.test(body[end - 1]) && /[\uDC00-\uDFFF]/.test(body[end])) end--;
+        documents.push({ key: `${prefix}-${hash.slice(0, 16)}-${String(part).padStart(4, '0')}`, body: untrustedDocument(body.slice(offset, end)) });
+        offset = end;
+      }
     };
     addParts('captions', capture.raw);
     addParts('transcript', capture.segments.map(segment => `[${(segment.startMs / 1000).toFixed(3)}s] ${segment.text}`).join('\n'));
     const provenance = { schema: 1, entry: record.preparedEntry, rawSha256: hash, language: capture.language, source: capture.source,
       retrievedAt: capture.retrievedAt, segmentCount: capture.segments.length, documents: documents.map(doc => doc.key), untrusted: true };
-    documents.push({ key: `source-${hash.slice(0, 16)}`, body: JSON.stringify(provenance, null, 2) });
+    documents.push({ key: `source-${hash.slice(0, 16)}`, body: untrustedDocument(JSON.stringify(provenance, null, 2)) });
     for (const doc of documents) await this.immutable(issue.id, doc.key, doc.body);
     await this.immutable(issue.id, 'plan', researchPlan(record.preparedEntry, this.config.catalogUrl!, documents.map(doc => doc.key)));
     if (issue.status === 'backlog' && !issue.assigneeAgentId && !issue.assigneeUserId) {

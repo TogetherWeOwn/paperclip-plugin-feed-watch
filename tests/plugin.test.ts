@@ -14,7 +14,7 @@ function fixture() {
   return h;
 }
 const config = { enabled: true, webhookEnabled: true, channelId: channel, researchAgentId: companyId, projectId: companyId,
-  publishedAfter: '2026-10-24T00:00:00Z', catalogUrl: 'https://catalog.example', workerUrl: 'https://worker.example',
+  publishedAfter: '2026-10-24T00:00:00Z', initialLastSeen: video, catalogUrl: 'https://catalog.example', workerUrl: 'https://worker.example',
   workerSecretRef: { type: 'secret_ref', secretId: companyId } };
 test('real SDK harness: disabled default job has no external work and valid manifest schema', async () => {
   const h = fixture(); const plugin = createPlugin().definition; await plugin.setup(h.ctx);

@@ -27,12 +27,14 @@ test('Worker is disabled by default, never subscribes/fetches without explicit e
 });
 test('verification requires outstanding topic/mode; records granted lease and reflects only exact challenge', async () => {
   const f = fixture(); const topic = `https://www.youtube.com/xml/feeds/videos.xml?channel_id=${channel}`;
-  const callback = `/websub?${new URLSearchParams({ 'hub.mode': 'subscribe', 'hub.topic': topic, 'hub.challenge': 'challenge-123', 'hub.lease_seconds': '3600' })}`;
+  let callback = `/websub?${new URLSearchParams({ 'hub.mode': 'subscribe', 'hub.topic': topic, 'hub.challenge': 'challenge-123', 'hub.lease_seconds': '3600' })}`;
   const request = () => new Request(`https://worker.example${callback}`);
   assert.equal((await handleRequest(request(), f.env, fetch, () => now)).status, 404);
   const sub = await f.call('/subscription', 'POST', {}, async (url, init) => {
     assert.equal(String(url), 'https://pubsubhubbub.appspot.com/subscribe');
     assert.equal(new URLSearchParams(String(init?.body)).get('hub.secret'), f.env.HUB_SECRET);
+    const subscribed = new URL(new URLSearchParams(String(init?.body)).get('hub.callback')!);
+    callback += `&verify=${subscribed.searchParams.get('verify')}`;
     return new Response('', { status: 202 });
   });
   assert.equal(sub.status, 202);
@@ -137,4 +139,55 @@ test('offline Worker → actual SDK hook: acknowledge only after signed durable 
   assert.ok((h.getState({ scopeKind: 'company', scopeId: companyId, namespace: manifest.id, stateKey: `${channel}:channel` }) as any).videos[video]);
   assert.equal(((await (await f.call('/inbox')).json()) as any).events.length, 0);
   assert.equal((await h.ctx.issues.list({ companyId })).length, 0); // Receipt alone never wakes a research agent.
+});
+
+test('an unauthenticated verification GET cannot consume outstanding subscription intent', async () => {
+  const f = fixture();
+  let callback = '';
+  await f.call('/subscription', 'POST', {}, async (_url, init) => {
+    callback = new URLSearchParams(String(init?.body)).get('hub.callback')!;
+    return new Response('', { status: 202 });
+  });
+  const query = new URLSearchParams({ 'hub.mode': 'subscribe', 'hub.topic': `https://www.youtube.com/xml/feeds/videos.xml?channel_id=${channel}`, 'hub.challenge': 'attacker', 'hub.lease_seconds': '86400' });
+  const forged = await handleRequest(new Request(`https://worker.example/websub?${query}`), f.env, fetch, () => now);
+  assert.equal(forged.status, 404);
+  const status = await (await f.call('/status')).json() as any;
+  assert.equal(status.lease, null); assert.ok(status.pending);
+  const valid = new URL(callback);
+  for (const [key, value] of query) valid.searchParams.set(key, value);
+  assert.equal((await handleRequest(new Request(valid), f.env, fetch, () => now)).status, 200);
+});
+
+test('403 cooldown survives real KV one-write-per-key-per-second limits', async () => {
+  const f = fixture(); let time = now; const writes = new Map<string, number>();
+  f.env.INBOX.put = async (key: string, value: string) => {
+    if (time - (writes.get(key) ?? 0) < 1000) throw new Error('KV 429: same-key write limit');
+    writes.set(key, time); f.values.set(key, value);
+  };
+  let calls = 0;
+  await f.call('/transcript', 'POST', { videoId: video, channelId: channel }, async () => { calls++; return new Response('', { status: 403 }); });
+  time += 120_000;
+  const body = JSON.stringify({ videoId: video, channelId: channel });
+  const headers = await signedHeaders(secret, 'POST', '/transcript', body, time);
+  const response = await handleRequest(new Request('https://worker.example/transcript', { method: 'POST', headers, body }), f.env, async () => { calls++; return new Response(''); }, () => time);
+  assert.equal(response.status, 503); assert.equal(calls, 1, 'six-hour cooldown must survive after the initial spacing expires');
+});
+
+test('verification capability remains secret and stable so renewal addresses the same subscription', async () => {
+  const f = fixture(); const callbacks: string[] = [];
+  for (let attempt = 0; attempt < 2; attempt++) {
+    await f.call('/subscription', 'POST', {}, async (_url, init) => {
+      callbacks.push(new URLSearchParams(String(init?.body)).get('hub.callback')!);
+      return new Response('', { status: 202 });
+    });
+    const callback = new URL(callbacks.at(-1)!);
+    assert.ok(callback.searchParams.get('verify'));
+    const status = await (await f.call('/status')).text();
+    assert.ok(!status.includes(callback.searchParams.get('verify')!), 'verification capability must not reach health logs');
+    callback.searchParams.set('hub.mode', 'subscribe');
+    callback.searchParams.set('hub.topic', `https://www.youtube.com/xml/feeds/videos.xml?channel_id=${channel}`);
+    callback.searchParams.set('hub.challenge', 'legitimate'); callback.searchParams.set('hub.lease_seconds', '3600');
+    assert.equal((await handleRequest(new Request(callback), f.env, fetch, () => now)).status, 200);
+  }
+  assert.equal(callbacks[0], callbacks[1]);
 });
