@@ -14,6 +14,7 @@ const schema = z.object({
   maxVideosPerTick: z.number().int().min(1).max(5).default(1),
   maxCaptionAttempts: z.number().int().min(2).max(100).default(12),
   webhookEnabled: z.boolean().default(false),
+  retryRequests: z.record(videoId, z.uuid()).default({}),
 }).strict();
 export type Config = z.infer<typeof schema>;
 export function parseConfig(value: unknown): Config {
