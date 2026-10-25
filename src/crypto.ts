@@ -1,5 +1,7 @@
 // WebSub signs original bytes. Internal requests additionally bind time + route.
 // https://www.w3.org/TR/websub/#authenticated-content-distribution
+// Native onWebhook receives no URL; sign a fixed purpose, not an unknowable UUID route.
+export const PLUGIN_PUSH_PATH = '/paperclip-feed-watch/youtube';
 const encoder = new TextEncoder();
 const algorithms = { sha1: 'SHA-1', sha256: 'SHA-256' } as const;
 export async function digest(body: string): Promise<string> {

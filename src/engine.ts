@@ -43,7 +43,7 @@ export class FeedWatch {
   }
   private key(stateKey: string) { return { scopeKind: 'company' as const, scopeId: this.companyId, namespace: PLUGIN_ID, stateKey: `${this.config.channelId}:${stateKey}` }; }
   async status(): Promise<ChannelState> {
-    return await this.ctx.state.get(this.key('channel')) as ChannelState | null ?? { videos: {}, degraded: {} };
+    return await this.ctx.state.get(this.key('channel')) as ChannelState | null ?? { videos: {}, degraded: {}, lastSeen: this.config.initialLastSeen };
   }
   private save(state: ChannelState) { return this.ctx.state.set(this.key('channel'), state); }
   private discover(state: ChannelState, entries: Entry[]) {
@@ -52,7 +52,7 @@ export class FeedWatch {
       const entry = entrySchema.parse(value);
       if (entry.channelId !== this.config.channelId) throw new Error('channel-not-allowed');
       if (seeded.has(entry.videoId) || Date.parse(entry.published) < Date.parse(this.config.publishedAfter!)) continue;
-      const existing = state.videos[entry.videoId];
+      const existing = Object.hasOwn(state.videos, entry.videoId) ? state.videos[entry.videoId] : undefined;
       if (existing) {
         if (Date.parse(entry.updated) > Date.parse(existing.entry.updated)) existing.entry = entry;
       } else state.videos[entry.videoId] = { entry, stage: 'discovered', discoveredAt: this.now(), captionAttempts: 0, retryAt: 0 };
@@ -89,7 +89,7 @@ export class FeedWatch {
       } catch { state.degraded.rss = 'rss-reconciliation-failed'; }
       await this.save(state);
       for (const [id, nonce] of Object.entries(this.config.retryRequests)) {
-        const record = state.videos[id];
+        const record = Object.hasOwn(state.videos, id) ? state.videos[id] : undefined;
         if (record && record.appliedRetryNonce !== nonce) {
           record.appliedRetryNonce = nonce;
           if (record.stage === 'caption-blocked') { record.stage = 'caption-pending'; record.captionAttempts = 0; record.retryAt = 0; }
@@ -167,8 +167,10 @@ export class FeedWatch {
     for (const doc of documents) await this.immutable(issue.id, doc.key, doc.body);
     await this.immutable(issue.id, 'plan', researchPlan(record.preparedEntry, this.config.catalogUrl!, documents.map(doc => doc.key)));
     if (issue.status === 'backlog' && !issue.assigneeAgentId && !issue.assigneeUserId) {
+      const researcher = await this.ctx.agents.get(this.config.researchAgentId!, this.companyId);
+      if (!researcher || ['paused', 'terminated', 'pending_approval'].includes(researcher.status)) throw new Error('researcher-unavailable');
       // Assignment is the native wake. Never comment just to wake anyone.
-      await this.ctx.issues.update(issue.id, { status: 'todo', assigneeAgentId: this.config.researchAgentId }, this.companyId);
+      await this.ctx.issues.update(issue.id, { status: 'todo', assigneeAgentId: researcher.id }, this.companyId);
     } else if (!issue.assigneeAgentId && !['done', 'in_progress', 'in_review', 'todo'].includes(issue.status)) throw new Error('issue-manually-held');
     record.stage = 'research-pending'; delete record.error;
     await this.save(state);

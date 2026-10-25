@@ -2,11 +2,12 @@ import { z } from 'zod';
 import { channelId, videoId } from './feed.ts';
 const httpsUrl = z.url().refine(value => { const url = new URL(value); return url.protocol === 'https:' && !url.username && !url.password && !url.hash && !url.search; }, 'Must be HTTPS without credentials, query or fragment');
 export const secretRef = z.object({ type: z.literal('secret_ref'), secretId: z.uuid(), version: z.union([z.number(), z.literal('latest')]).optional() }).strict();
-const schema = z.object({
+export const schema = z.object({
   enabled: z.boolean().default(false),
   channelId: channelId.optional(), researchAgentId: z.uuid().optional(), projectId: z.uuid().optional(),
   publishedAfter: z.iso.datetime({ offset: true }).optional(),
   seedVideoIds: z.array(videoId).max(50_000).default([]),
+  initialLastSeen: videoId.optional(),
   workerUrl: httpsUrl.optional(), workerSecretRef: secretRef.optional(),
   transcriptProviderUrl: httpsUrl.optional(), transcriptSecretRef: secretRef.optional(),
   youtubeApiKeyRef: secretRef.optional(),
