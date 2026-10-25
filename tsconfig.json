@@ -4,5 +4,5 @@
     "strict": true, "noEmit": true, "skipLibCheck": true,
     "allowImportingTsExtensions": true, "types": ["node"], "lib": ["ES2023", "DOM", "DOM.Iterable"]
   },
-  "include": ["src/**/*.ts", "cloudflare/**/*.ts", "tests/**/*.ts"]
+  "include": ["src/**/*.ts", "cloudflare/**/*.ts", "provider/**/*.ts", "tests/**/*.ts"]
 }

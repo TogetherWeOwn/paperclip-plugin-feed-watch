@@ -1,0 +1,10 @@
+.git
+node_modules
+dist
+.wrangler
+.scratch
+.env*
+.dev.vars*
+*.pem
+*.key
+coverage
