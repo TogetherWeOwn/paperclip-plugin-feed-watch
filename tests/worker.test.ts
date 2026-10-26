@@ -64,32 +64,6 @@ test('tampered notification, wrong channel and unauthenticated internal calls ne
   assert.equal((await handleRequest(new Request('https://worker.example/inbox'), f.env, fetch, () => now)).status, 401);
   assert.equal(f.values.size, 0);
 });
-test('Worker transcript path authenticates, verifies channel, preserves full raw source and prefers manual English', async () => {
-  const f = fixture(); let calls = 0;
-  const raw = '<timedtext><body><p t="1234"><s>all content</s></p></body></timedtext>';
-  const response = await f.call('/transcript', 'POST', { videoId: video, channelId: channel }, async (url, init) => {
-    calls++;
-    if (calls === 1) { assert.ok(String(url).includes('/youtubei/v1/player')); return Response.json({ videoDetails: { channelId: channel }, captions: { playerCaptionsTracklistRenderer: { captionTracks: [
-      { languageCode: 'en', kind: 'asr', baseUrl: 'https://www.youtube.com/api/timedtext?kind=asr' },
-      { languageCode: 'en', baseUrl: 'https://www.youtube.com/api/timedtext?kind=manual' },
-    ] } } }); }
-    assert.ok(String(url).includes('kind=manual')); assert.equal(init?.redirect, 'manual');
-    return new Response(raw);
-  });
-  assert.equal(response.status, 200);
-  const transcript = await response.json() as any;
-  assert.equal(transcript.raw, raw); assert.equal(transcript.segments[0].startMs, 1234);
-  assert.equal(transcript.language, 'en'); assert.ok(!JSON.stringify(transcript).includes('baseUrl'));
-});
-test('poisoned signed caption URL cannot SSRF; bot walls and missing captions remain retryable', async () => {
-  for (const baseUrl of ['http://127.0.0.1/secret', 'https://evil.example/api/timedtext', 'https://www.youtube.com.evil.example/api/timedtext']) {
-    const f = fixture(); let calls = 0;
-    const response = await f.call('/transcript', 'POST', { videoId: video, channelId: channel }, async () => { calls++; return Response.json({ videoDetails: { channelId: channel }, captions: { playerCaptionsTracklistRenderer: { captionTracks: [{ languageCode: 'en', baseUrl }] } } }); });
-    assert.equal(response.status, 503); assert.equal(calls, 1);
-  }
-  const f = fixture(); const response = await f.call('/transcript', 'POST', { videoId: video, channelId: channel }, async () => Response.json({ playabilityStatus: { status: 'LOGIN_REQUIRED' } }));
-  assert.equal(response.status, 503);
-});
 test('failed push leaves notification durable and uses a separate purpose-bound internal signature', async () => {
   const f = fixture(); f.env.PLUGIN_WEBHOOK_URL = 'https://paperclip.example/api/plugins/test/webhooks/youtube';
   const request = new Request('https://worker.example/websub', { method: 'POST', body: atom(), headers: { 'x-hub-signature': await sign(f.env.HUB_SECRET!, atom()) } });
@@ -107,13 +81,6 @@ test('wrong-channel XML with a VALID hub signature is rejected (signature is not
   const response = await handleRequest(new Request('https://worker.example/websub', { method: 'POST', body, headers: { 'x-hub-signature': await sign(f.env.HUB_SECRET!, body) } }), f.env, fetch, () => now);
   assert.equal(response.status, 503); assert.equal(f.values.size, 0);
 });
-test('rate-limit response persists a six-hour caption cooldown across Worker invocations', async () => {
-  const f = fixture(); let calls = 0;
-  const failed = await f.call('/transcript', 'POST', { videoId: video, channelId: channel }, async () => { calls++; return new Response('', { status: 429 }); });
-  assert.equal(failed.status, 503);
-  const second = await f.call('/transcript', 'POST', { videoId: video, channelId: channel }, async () => { calls++; return new Response(''); });
-  assert.equal(second.status, 503); assert.equal(calls, 1);
-});
 test('hub and internal forwarding keys must be distinct', async () => {
   const f = fixture(); f.env.HUB_SECRET = secret;
   assert.equal((await f.call('/status')).status, 503);
@@ -125,8 +92,8 @@ test('offline Worker → actual SDK hook: acknowledge only after signed durable 
   const f = fixture(); const companyId = f.env.COMPANY_ID;
   f.env.PLUGIN_WEBHOOK_URL = 'https://paperclip.example/api/plugins/test/webhooks/youtube';
   const h = createTestHarness({ manifest, config: { enabled: true, webhookEnabled: true, channelId: channel,
-    projectId: companyId, researchAgentId: companyId, publishedAfter: '2026-10-24T00:00:00Z',
-    workerUrl: 'https://worker.example', workerSecretRef: { type: 'secret_ref', secretId: companyId }, catalogUrl: 'https://catalog.example' } });
+    projectId: companyId, publishedAfter: '2026-10-24T00:00:00Z',
+    workerUrl: 'https://worker.example', workerSecretRef: { type: 'secret_ref', secretId: companyId } } });
   h.ctx.secrets.resolve = async () => secret;
   const plugin = createPlugin().definition; await plugin.setup(h.ctx);
   const body = atom();
@@ -156,21 +123,6 @@ test('an unauthenticated verification GET cannot consume outstanding subscriptio
   const valid = new URL(callback);
   for (const [key, value] of query) valid.searchParams.set(key, value);
   assert.equal((await handleRequest(new Request(valid), f.env, fetch, () => now)).status, 200);
-});
-
-test('403 cooldown survives real KV one-write-per-key-per-second limits', async () => {
-  const f = fixture(); let time = now; const writes = new Map<string, number>();
-  f.env.INBOX.put = async (key: string, value: string) => {
-    if (time - (writes.get(key) ?? 0) < 1000) throw new Error('KV 429: same-key write limit');
-    writes.set(key, time); f.values.set(key, value);
-  };
-  let calls = 0;
-  await f.call('/transcript', 'POST', { videoId: video, channelId: channel }, async () => { calls++; return new Response('', { status: 403 }); });
-  time += 120_000;
-  const body = JSON.stringify({ videoId: video, channelId: channel });
-  const headers = await signedHeaders(secret, 'POST', '/transcript', body, time);
-  const response = await handleRequest(new Request('https://worker.example/transcript', { method: 'POST', headers, body }), f.env, async () => { calls++; return new Response(''); }, () => time);
-  assert.equal(response.status, 503); assert.equal(calls, 1, 'six-hour cooldown must survive after the initial spacing expires');
 });
 
 test('verification capability remains secret and stable so renewal addresses the same subscription', async () => {
@@ -232,16 +184,6 @@ test('manual hub redirects and other non-2xx responses fail closed without follo
   }
 });
 
-test('caption redirects fail closed with the edge-supported manual mode', async () => {
-  const f = fixture(); let requests = 0;
-  const response = await f.call('/transcript', 'POST', { videoId: video, channelId: channel }, async (_url, init) => {
-    assert.equal(init?.redirect, 'manual'); requests++;
-    return new Response('', { status: 307, headers: { location: 'https://untrusted.example/collect' } });
-  });
-  assert.equal(response.status, 503);
-  assert.equal(requests, 1);
-});
-
 test('manual forwarding redirects preserve the signed durable event for pull retry', async () => {
   const f = fixture(); let requests = 0;
   f.env.PLUGIN_WEBHOOK_URL = 'https://paperclip.example/api/plugins/test/webhooks/youtube';
@@ -254,4 +196,10 @@ test('manual forwarding redirects preserve the signed durable event for pull ret
   assert.equal(response.status, 202);
   assert.equal(requests, 1);
   assert.equal(((await (await f.call('/inbox')).json()) as any).events.length, 1);
+});
+
+test('the Worker has no transcript route: a signed /transcript request is a 404 and fetches nothing', async () => {
+  const f = fixture(); let calls = 0;
+  const response = await f.call('/transcript', 'POST', { videoId: video, channelId: channel }, async () => { calls++; return new Response(''); });
+  assert.equal(response.status, 404); assert.equal(calls, 0);
 });

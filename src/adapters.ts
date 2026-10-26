@@ -2,20 +2,14 @@ import { z } from 'zod';
 import type { PluginContext } from '@paperclipai/plugin-sdk';
 import type { Config } from './config.ts';
 import { entrySchema, parseFeed, readLimited, type Entry } from './feed.ts';
-import { PLUGIN_ID, type Transport, type Transcript } from './engine.ts';
+import { PLUGIN_ID, type Transport } from './engine.ts';
 import { signedHeaders } from './crypto.ts';
-const transcriptSchema = z.object({ videoId: z.string(), language: z.string().min(1).max(50), source: z.literal('youtube-captions'),
-  retrievedAt: z.iso.datetime({ offset: true }), raw: z.string().min(1).max(4_194_304),
-  segments: z.array(z.object({ startMs: z.number().finite().nonnegative(), text: z.string().min(1) })).min(1).max(100_000) });
 export function createTransport(ctx: PluginContext, companyId: string, config: Config): Transport {
   const key = (name: string) => ({ scopeKind: 'company' as const, scopeId: companyId, namespace: PLUGIN_ID, stateKey: `${config.channelId}:${name}` });
-  const request = async (path: string, method = 'GET', value?: unknown, provider = false): Promise<any> => {
-    const base = provider ? config.transcriptProviderUrl ?? config.workerUrl! : config.workerUrl!;
-    const secret = provider ? config.transcriptSecretRef ?? config.workerSecretRef! : config.workerSecretRef!;
-    const root = new URL(base); root.pathname = root.pathname.replace(/\/$/, '') + path.split('?')[0]; root.search = path.includes('?') ? path.slice(path.indexOf('?')) : '';
+  const request = async (path: string, method = 'GET', value?: unknown): Promise<any> => {
+    const root = new URL(config.workerUrl!); root.pathname = root.pathname.replace(/\/$/, '') + path.split('?')[0]; root.search = path.includes('?') ? path.slice(path.indexOf('?')) : '';
     const body = value === undefined ? '' : JSON.stringify(value);
-    const configPath = provider && config.transcriptSecretRef ? 'transcriptSecretRef' : 'workerSecretRef';
-    const headers = await signedHeaders(await ctx.secrets.resolve(secret, { companyId, configPath }), method, root.pathname + root.search, body);
+    const headers = await signedHeaders(await ctx.secrets.resolve(config.workerSecretRef!, { companyId, configPath: 'workerSecretRef' }), method, root.pathname + root.search, body);
     const response = await ctx.http.fetch(root.href, { method, headers, body: body || undefined, redirect: 'error' });
     return JSON.parse(await readLimited(response, 12_582_912));
   };
@@ -52,11 +46,6 @@ export function createTransport(ctx: PluginContext, companyId: string, config: C
         pageToken = z.string().max(1000).parse(data.nextPageToken);
       }
       throw new Error('gap-page-limit');
-    },
-    async transcript(entry): Promise<Transcript> {
-      const result = transcriptSchema.parse(await request('/transcript', 'POST', { videoId: entry.videoId, channelId: config.channelId }, true));
-      if (result.videoId !== entry.videoId) throw new Error('transcript-invalid');
-      return result;
     },
     async maintenance() {
       const status = await request('/status');

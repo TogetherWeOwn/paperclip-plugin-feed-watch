@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseFeed, parseCaptions } from '../src/feed.ts';
+import { parseFeed } from '../src/feed.ts';
 import { sign, verify, signedHeaders, authenticate, digest } from '../src/crypto.ts';
 import { parseConfig } from '../src/config.ts';
 
@@ -10,10 +10,11 @@ test('disabled is the default; an enabled config requires deliberate scope and b
   assert.equal(parseConfig({}).enabled, false);
   assert.throws(() => parseConfig({ enabled: true }));
 });
-test('RSS extracts IDs, decoded title and canonical URLs, not untrusted link URLs', () => {
+test('RSS extracts IDs, decoded title, publish date and canonical URLs, not untrusted link URLs', () => {
   const [entry] = parseFeed(atom(), channel);
   assert.equal(entry.videoId, video);
   assert.equal(entry.title, 'Research & testing');
+  assert.equal(entry.published, '2026-10-25T10:00:00Z');
   assert.equal(entry.url, `https://www.youtube.com/watch?v=${video}`);
   assert.equal(parseFeed('<feed/>', channel).length, 0);
 });
@@ -21,10 +22,6 @@ test('XML rejects entities, mismatched channels, malformed IDs and oversize inpu
   for (const xml of ['<!DOCTYPE feed [<!ENTITY x SYSTEM "file:///etc/passwd">]><feed/>', atom([video], 'UCaaaaaaaaaaaaaaaaaaaaaa'), atom(['../../admin']), atom() + 'x', ' '.repeat(300_000)]) {
     assert.throws(() => parseFeed(xml, channel));
   }
-});
-test('parse complete srv3 and json3 captions including nested segments and timestamps', () => {
-  assert.deepEqual(parseCaptions('<timedtext><body><p t="1234" d="2000"><s>Hello</s><s> world &amp; friends</s></p></body></timedtext>'), [{ startMs: 1234, text: 'Hello world & friends' }]);
-  assert.deepEqual(parseCaptions(JSON.stringify({ events: [{ tStartMs: 3456, segs: [{ utf8: 'A' }, { utf8: ' B' }] }] })), [{ startMs: 3456, text: 'A B' }]);
 });
 test('WebSub HMAC verifies original bytes for SHA-1 and SHA-256 and fails closed', async () => {
   for (const algorithm of ['SHA-1', 'SHA-256'] as const) {
