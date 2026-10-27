@@ -13,7 +13,7 @@ export interface Transport {
 type Video = {
   entry: Entry; stage: 'discovered' | 'stub-created';
   discoveredAt: number; lastAttemptAt?: number; retryAt: number; error?: string;
-  issueId?: string; createAttempted?: boolean;
+  issueId?: string; createAttempted?: boolean; preparedEntry?: Entry;
 };
 export type ChannelState = { videos: Record<string, Video>; lastSeen?: string; lastCheckAt?: number; degraded: Record<string, string> };
 const queues = new WeakMap<PluginContext, Promise<unknown>>();
@@ -35,6 +35,8 @@ function normalize(state: ChannelState): ChannelState {
   for (const record of Object.values(state.videos)) {
     if (record.stage !== 'discovered' && record.stage !== 'stub-created') {
       record.stage = record.issueId ? 'stub-created' : 'discovered';
+      // Obsolete caption backoff and errors must not delay or mislabel the stub.
+      record.retryAt = 0; delete record.error;
     }
   }
   return state;
@@ -122,8 +124,8 @@ export class FeedWatch {
     if (record.createAttempted || record.issueId) throw new Error('ambiguous-create');
     record.createAttempted = true; await this.save(state);
     const issue = await this.ctx.issues.create({ companyId: this.companyId, projectId: this.config.projectId,
-      title: `Research YouTube: ${record.entry.title}`.slice(0, 200),
-      description: stubDescription(record.entry),
+      title: `Research YouTube: ${record.preparedEntry!.title}`.slice(0, 200),
+      description: stubDescription(record.preparedEntry!),
       status: 'backlog', priority: 'low', originKind, originId });
     record.issueId = issue.id; await this.save(state); return issue;
   }
@@ -138,8 +140,11 @@ export class FeedWatch {
   // the card, provenance in one immutable source document. Assignment would
   // wake an agent that has no transcript yet, so this plugin never assigns.
   private async prepare(state: ChannelState, record: Video): Promise<void> {
+    // Freeze the documented entry before any side effect: a later feed <updated>
+    // bump must not make a retry disagree with an already-committed immutable doc.
+    record.preparedEntry ??= record.entry;
     const issue = await this.issue(state, record);
-    await this.immutable(issue.id, 'source', stubDocument(record.entry, record.discoveredAt));
+    await this.immutable(issue.id, 'source', stubDocument(record.preparedEntry, record.discoveredAt));
     record.stage = 'stub-created'; delete record.error;
     await this.save(state);
   }

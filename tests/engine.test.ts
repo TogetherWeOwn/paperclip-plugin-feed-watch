@@ -17,6 +17,7 @@ function fixture() {
   let failCreateAfterCommit = false;
   let failCreateBeforeCommit = false;
   let failDoc = false;
+  let failDocAfterCommit = false;
   const ctx = {
     state: { get: async (key: any) => structuredClone(states.get(key.stateKey) ?? null), set: async (key: any, value: any) => { states.set(key.stateKey, structuredClone(value)); }, delete: async (key: any) => { states.delete(key.stateKey); } },
     issues: {
@@ -33,7 +34,12 @@ function fixture() {
       update: async () => { throw new Error('assignment-must-not-happen'); },
       documents: {
         get: async (id: string, key: string) => docs.get(`${id}:${key}`) ?? null,
-        upsert: async (input: any) => { if (failDoc) { failDoc = false; throw new Error('connection'); } docs.set(`${input.issueId}:${input.key}`, structuredClone(input)); return input; },
+        upsert: async (input: any) => {
+          if (failDoc) { failDoc = false; throw new Error('connection'); }
+          docs.set(`${input.issueId}:${input.key}`, structuredClone(input));
+          if (failDocAfterCommit) { failDocAfterCommit = false; throw new Error('connection'); }
+          return input;
+        },
       },
     },
   } as unknown as PluginContext;
@@ -45,7 +51,7 @@ function fixture() {
   let time = Date.parse('2026-10-25T12:00:00Z');
   const engine = () => new FeedWatch(ctx, companyId, localConfig, io, () => time);
   return { states, docs, issues, io, ctx, engine, config: localConfig,
-    advance: () => { time += 86400000; }, failCreate: (after: boolean) => { if (after) failCreateAfterCommit = true; else failCreateBeforeCommit = true; }, failDoc: () => { failDoc = true; } };
+    advance: () => { time += 86400000; }, failCreate: (after: boolean) => { if (after) failCreateAfterCommit = true; else failCreateBeforeCommit = true; }, failDoc: () => { failDoc = true; }, failDocAfterCommit: () => { failDocAfterCommit = true; } };
 }
 
 test('disabled tick and webhook have no network, state writes or cards', async () => {
@@ -109,6 +115,15 @@ test('document failure keeps the video pending and unwoken; restart finishes the
   f.advance(); await f.engine().tick();
   assert.equal(f.issues.length, 1); assert.equal(f.issues[0].status, 'backlog');
   assert.equal((await f.engine().status()).videos[video].stage, 'stub-created');
+});
+test('a committed-but-lost source write converges after the feed <updated> changes', async () => {
+  const f = fixture(); f.failDocAfterCommit(); await f.engine().tick();
+  assert.equal((await f.engine().status()).videos[video].stage, 'discovered');
+  f.io.rss = async () => parseFeed(atom().replace('2026-10-25T11:00:00Z', '2026-10-25T13:00:00Z'), channel);
+  for (let n = 0; n < 2; n++) { f.advance(); await f.engine().tick(); }
+  const record = (await f.engine().status()).videos[video];
+  assert.equal(record.stage, 'stub-created'); assert.equal(record.error, undefined);
+  assert.equal(f.issues.length, 1);
 });
 test('seeded completed videos are not re-researched and unrelated channels cannot enter state', async () => {
   const f = fixture(); f.config.seedVideoIds.push(video);
@@ -175,6 +190,7 @@ test('legacy caption/research stages normalize without re-issuing cards or rewri
   const status = await f.engine().status();
   assert.equal(status.videos[video].stage, 'stub-created');
   assert.equal(status.videos[other.videoId].stage, 'stub-created');
+  assert.equal(status.videos[video].retryAt, 0);
   assert.equal(f.issues.length, 1); // Only the card-less legacy record still owes its stub.
   assert.ok(f.issues[0].originId.endsWith(other.videoId));
 });
