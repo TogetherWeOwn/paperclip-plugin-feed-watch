@@ -13,8 +13,8 @@ function fixture() {
   h.ctx.http.fetch = async () => { throw new Error('unconfigured-external-request'); };
   return h;
 }
-const config = { enabled: true, webhookEnabled: true, channelId: channel, researchAgentId: companyId, projectId: companyId,
-  publishedAfter: '2026-10-24T00:00:00Z', initialLastSeen: video, catalogUrl: 'https://catalog.example', workerUrl: 'https://worker.example',
+const config = { enabled: true, webhookEnabled: true, channelId: channel, projectId: companyId,
+  publishedAfter: '2026-10-24T00:00:00Z', initialLastSeen: video, workerUrl: 'https://worker.example',
   workerSecretRef: { type: 'secret_ref', secretId: companyId } };
 test('real SDK harness: disabled default job has no external work and valid manifest schema', async () => {
   const h = fixture(); const plugin = createPlugin().definition; await plugin.setup(h.ctx);
@@ -25,7 +25,7 @@ test('real SDK harness: disabled default job has no external work and valid mani
   assert.equal(manifest.jobs[0].schedule, '*/15 * * * *');
   assert.ok(!manifest.capabilities.some(cap => String(cap).includes('invoke') || String(cap).includes('sessions')));
 });
-test('real SDK harness: feed → full transcript documents → native assignment, then replay is a no-op', async () => {
+test('real SDK harness: feed → one unassigned backlog stub with publish date, replay is a no-op, captions are never fetched', async () => {
   const h = fixture(); h.setConfig(config);
   const paths: string[] = [];
   h.ctx.http.fetch = async value => {
@@ -33,17 +33,18 @@ test('real SDK harness: feed → full transcript documents → native assignment
     if (url.pathname === '/feeds/videos.xml') return new Response(atom());
     if (url.pathname === '/status') return Response.json({ lease: { expiresAt: Date.now() + 100_000, renewAt: Date.now() + 50_000 } });
     if (url.pathname === '/inbox') return Response.json({ events: [] });
-    if (url.pathname === '/transcript') return Response.json({ videoId: video, raw: '<timedtext><p>all text</p></timedtext>', segments: [{ startMs: 0, text: 'all text' }], language: 'en', source: 'youtube-captions', retrievedAt: new Date().toISOString() });
     throw new Error('unexpected-network');
   };
   let plugin = createPlugin().definition; await plugin.setup(h.ctx); await h.runJob('poll');
   const [issue] = await h.ctx.issues.list({ companyId });
-  assert.equal(issue.status, 'todo'); assert.equal(issue.assigneeAgentId, companyId);
-  assert.ok((await h.ctx.issues.documents.get(issue.id, 'plan', companyId))?.body.includes('UNTRUSTED SOURCE DATA'));
-  assert.ok((await h.ctx.issues.documents.list(issue.id, companyId)).length >= 4);
+  assert.equal(issue.status, 'backlog'); assert.equal(issue.assigneeAgentId, null);
+  assert.ok(issue.description?.includes('Published: 2026-10-25T10:00:00Z'));
+  const docs = await h.ctx.issues.documents.list(issue.id, companyId);
+  assert.deepEqual(docs.map((doc: any) => doc.key), ['source']);
+  assert.ok((await h.ctx.issues.documents.get(issue.id, 'source', companyId))?.body.includes('UNTRUSTED SOURCE DATA'));
   plugin = createPlugin().definition; await plugin.setup(h.ctx); await h.runJob('poll');
   assert.equal((await h.ctx.issues.list({ companyId })).length, 1);
-  assert.equal(paths.filter(path => path === '/transcript').length, 1);
+  assert.ok(!paths.includes('/transcript'), 'discovery must never request captions');
   assert.equal((await plugin.onHealth!()).status, 'ok');
 });
 test('real SDK harness: public webhook authenticates separate forwarding signature and rejects cross-channel payloads', async () => {
@@ -55,21 +56,6 @@ test('real SDK harness: public webhook authenticates separate forwarding signatu
   await assert.rejects(plugin.onWebhook!(await input({ ...payload, channelId: 'UCaaaaaaaaaaaaaaaaaaaaaa' })));
   assert.equal((await h.ctx.issues.list({ companyId })).length, 0); // Only the native job issues cards.
   const health = await plugin.onHealth!(); assert.equal(health.status, 'degraded'); // Not polled yet, no false success.
-});
-test('paused researcher is never resumed or assigned; prepared sources stay durable for recovery', async () => {
-  const h = fixture(); h.setConfig(config); h.seed({ agents: [{ id: companyId, companyId, name: 'paused', status: 'paused' } as any] });
-  h.ctx.http.fetch = async value => {
-    const path = new URL(value).pathname;
-    if (path === '/feeds/videos.xml') return new Response(atom());
-    if (path === '/status') return Response.json({ lease: { expiresAt: Date.now() + 100_000, renewAt: Date.now() + 50_000 } });
-    if (path === '/inbox') return Response.json({ events: [] });
-    return Response.json({ videoId: video, raw: '<timedtext><p>text</p></timedtext>', segments: [{ startMs: 0, text: 'text' }], language: 'en', source: 'youtube-captions', retrievedAt: new Date().toISOString() });
-  };
-  const plugin = createPlugin().definition; await plugin.setup(h.ctx); await h.runJob('poll');
-  const [issue] = await h.ctx.issues.list({ companyId });
-  assert.equal(issue.status, 'backlog'); assert.equal(issue.assigneeAgentId, null);
-  assert.ok(await h.ctx.issues.documents.get(issue.id, 'plan', companyId));
-  assert.equal((await plugin.onHealth!()).status, 'degraded');
 });
 test('poll and health skip companies that never stored this plugin config, but still report real config failures', async () => {
   const other = '22222222-2222-4222-8222-222222222222';

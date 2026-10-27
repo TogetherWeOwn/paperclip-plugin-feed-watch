@@ -1,7 +1,7 @@
 import type { KVNamespace } from '@cloudflare/workers-types';
 import { z } from 'zod';
 import { authenticate, digest, signedHeaders, verify, PLUGIN_PUSH_PATH } from '../src/crypto.ts';
-import { channelId, videoId, parseFeed, parseCaptions, readLimited } from '../src/feed.ts';
+import { channelId, parseFeed, readLimited } from '../src/feed.ts';
 export interface Env {
   ENABLED?: string; CHANNEL_ID: string; COMPANY_ID: string; CALLBACK_URL: string;
   PLUGIN_WEBHOOK_URL?: string; SHARED_SECRET?: string; HUB_SECRET?: string; INBOX: KVNamespace;
@@ -26,48 +26,6 @@ async function acknowledge(env: Env, id: string) {
   // Keep a receipt for redelivery/consistency races. No unacknowledged event TTL.
   await env.INBOX.put(ackKey(env, id), '1', { expirationTtl: 2_592_000 });
   await env.INBOX.delete(eventKey(env, id));
-}
-async function transcript(env: Env, id: string, fetcher: typeof fetch, now: number) {
-  // One serialized Paperclip consumer is the issuer. This is a conservative
-  // backstop, NOT a globally atomic rate limiter (KV is eventually consistent).
-  const controlKey = stateKey(env, 'captions');
-  const day = new Date(now).toISOString().slice(0, 10);
-  const control = await stored<{ day: string; count: number; last: number; blockedUntil: number }>(env, controlKey) ?? { day, count: 0, last: 0, blockedUntil: 0 };
-  if (control.day !== day) { control.day = day; control.count = 0; }
-  const blockedUntil = await stored<number>(env, stateKey(env, 'caption-cooldown')) ?? 0;
-  if (Math.max(control.blockedUntil, blockedUntil) > now || now - control.last < 60_000 || control.count >= 96) throw new Error('caption-cooldown');
-  control.last = now; control.count++;
-  await env.INBOX.put(controlKey, JSON.stringify(control));
-  const fetchText = async (url: string, init?: RequestInit) => {
-    const response = await fetcher(url, { ...init, redirect: 'manual', signal: AbortSignal.timeout(20_000) });
-    if (response.status === 429 || response.status === 403) {
-      control.blockedUntil = now + 21_600_000;
-      // A second write to controlKey in this same second would violate KV's
-      // per-key write limit and lose the cooldown. This key is written only
-      // on a block, and no further acquisition runs while it is active.
-      await env.INBOX.put(stateKey(env, 'caption-cooldown'), JSON.stringify(control.blockedUntil));
-    }
-    return readLimited(response, 4_194_304);
-  };
-  // Current acquisition-client reference: fetch_transcripts.py (2026-10-22).
-  // A Worker can be bot-walled; private/residential egress is NEVER exposed here.
-  const userAgent = 'com.google.android.youtube/21.26.364 (Linux; U; Android 11) gzip';
-  const player = JSON.parse(await fetchText('https://www.youtube.com/youtubei/v1/player?prettyPrint=false', {
-    method: 'POST', headers: { 'content-type': 'application/json', 'user-agent': userAgent },
-    body: JSON.stringify({ videoId: id, context: { client: { clientName: 'ANDROID', clientVersion: '21.26.364', androidSdkVersion: 30, hl: 'en', gl: 'US', userAgent } } }),
-  }));
-  if (player.videoDetails?.channelId !== env.CHANNEL_ID) throw new Error('caption-pending');
-  const tracks = z.array(z.object({ baseUrl: z.url(), languageCode: z.string().max(50), kind: z.string().optional() })).parse(player.captions?.playerCaptionsTracklistRenderer?.captionTracks ?? []);
-  const rank = (track: typeof tracks[number]) => track.languageCode === 'en' ? track.kind === 'asr' ? 1 : 0 : 2;
-  const track = tracks.sort((a,b) => rank(a) - rank(b))[0];
-  if (!track) throw new Error('caption-pending');
-  const url = new URL(track.baseUrl);
-  if (url.protocol !== 'https:' || url.username || url.password || !['www.youtube.com', 'youtube.com'].includes(url.hostname) || url.pathname !== '/api/timedtext' || url.port) throw new Error('caption-url-not-allowed');
-  // Do not request auto-translation. Signed track URLs never leave this function.
-  url.searchParams.delete('tlang');
-  const raw = await fetchText(url.href);
-  const segments = parseCaptions(raw);
-  return { videoId: id, raw, segments, language: track.languageCode, source: 'youtube-captions', retrievedAt: new Date(now).toISOString() };
 }
 export async function handleRequest(request: Request, env: Env, fetcher: typeof fetch = fetch, clock: () => number = Date.now): Promise<Response> {
   if (env.ENABLED !== 'true') return json({ error: 'disabled' }, 503);
@@ -149,11 +107,6 @@ export async function handleRequest(request: Request, env: Env, fetcher: typeof 
     if (url.pathname === '/ack' && request.method === 'POST') {
       const { id } = z.object({ id: z.string().regex(/^[a-f0-9]{64}$/) }).strict().parse(JSON.parse(body));
       await acknowledge(env, id); return json({ acknowledged: true });
-    }
-    if (url.pathname === '/transcript' && request.method === 'POST') {
-      const input = z.object({ videoId, channelId }).strict().parse(JSON.parse(body));
-      if (input.channelId !== env.CHANNEL_ID) return json({ error: 'channel-not-allowed' }, 403);
-      return json(await transcript(env, input.videoId, fetcher, now));
     }
     return json({ error: 'not-found' }, 404);
   } catch { return json({ error: 'upstream-or-validation-failed' }, 503); }

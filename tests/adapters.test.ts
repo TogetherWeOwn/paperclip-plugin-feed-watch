@@ -5,8 +5,8 @@ import { createTransport } from '../src/adapters.ts';
 import { parseConfig } from '../src/config.ts';
 import { channel, video, atom } from './fixtures.ts';
 const company = '11111111-1111-4111-8111-111111111111';
-function config() { return parseConfig({ enabled: true, channelId: channel, researchAgentId: company, projectId: company,
-  publishedAfter: '2026-10-24T00:00:00Z', workerUrl: 'https://worker.example', workerSecretRef: { type: 'secret_ref', secretId: company }, catalogUrl: 'https://catalog.example', youtubeApiKeyRef: { type: 'secret_ref', secretId: company } }); }
+function config() { return parseConfig({ enabled: true, channelId: channel, projectId: company,
+  publishedAfter: '2026-10-24T00:00:00Z', workerUrl: 'https://worker.example', workerSecretRef: { type: 'secret_ref', secretId: company }, youtubeApiKeyRef: { type: 'secret_ref', secretId: company } }); }
 test('RSS uses populated /feeds endpoint; gap recovery paginates until exact known ID', async () => {
   let page = 0;
   const requests: string[] = [];

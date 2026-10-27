@@ -8,13 +8,12 @@ export const entrySchema = z.object({
   url: z.string().url(),
 });
 export type Entry = z.infer<typeof entrySchema>;
-export type Segment = { startMs: number; text: string };
 const array = <T>(value: T | T[] | undefined): T[] => value === undefined ? [] : Array.isArray(value) ? value : [value];
 // No DTDs (including internal expansion), external entities, or unbounded XML.
-function xml(body: string, maxBytes: number, preserveOrder = false) {
+function xml(body: string, maxBytes: number) {
   if (new TextEncoder().encode(body).length > maxBytes || /<!DOCTYPE|<!ENTITY/i.test(body) || XMLValidator.validate(body) !== true) throw new Error('invalid-xml');
   return new XMLParser({ ignoreAttributes: false, attributeNamePrefix: '@', parseTagValue: false,
-    trimValues: false, preserveOrder, processEntities: true }).parse(body);
+    trimValues: false, processEntities: true }).parse(body);
 }
 export function parseFeed(body: string, expectedChannel: string): Entry[] {
   channelId.parse(expectedChannel);
@@ -28,37 +27,6 @@ export function parseFeed(body: string, expectedChannel: string): Entry[] {
     if (result.channelId !== expectedChannel) throw new Error('channel-not-allowed');
     return result;
   });
-}
-function text(nodes: any[]): string {
-  return nodes.map(node => typeof node['#text'] === 'string' ? node['#text'] : Object.entries(node)
-    .filter(([key]) => key !== ':@').map(([, value]) => Array.isArray(value) ? text(value) : '').join('')).join('');
-}
-export function parseCaptions(body: string): Segment[] {
-  if (new TextEncoder().encode(body).length > 4_194_304) throw new Error('captions-too-large');
-  const segments: Segment[] = [];
-  if (body.trimStart().startsWith('{')) {
-    const data = JSON.parse(body);
-    for (const event of array<any>(data.events)) {
-      const value = array<any>(event.segs).map(seg => typeof seg.utf8 === 'string' ? seg.utf8 : '').join('');
-      if (value.trim()) segments.push({ startMs: Number(event.tStartMs ?? 0), text: value });
-    }
-  } else {
-    const nodes = xml(body, 4_194_304, true);
-    const visit = (items: any[]) => {
-      for (const node of items) {
-        for (const [name, value] of Object.entries(node)) {
-          if ((name === 'p' || name === 'text') && Array.isArray(value)) {
-            const attrs = node[':@'] ?? {};
-            const valueText = text(value);
-            if (valueText.trim()) segments.push({ startMs: name === 'p' ? Number(attrs['@t'] ?? 0) : Math.round(Number(attrs['@start'] ?? 0) * 1000), text: valueText });
-          } else if (Array.isArray(value)) visit(value);
-        }
-      }
-    };
-    visit(nodes);
-  }
-  if (!segments.length || segments.some(seg => !Number.isFinite(seg.startMs) || seg.startMs < 0)) throw new Error('caption-pending');
-  return segments;
 }
 export async function readLimited(response: Response, maxBytes: number): Promise<string> {
   if (!response.ok) throw new Error(`upstream-http-${response.status}`);

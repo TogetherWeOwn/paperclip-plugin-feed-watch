@@ -1,7 +1,7 @@
 {
   "name": "@togetherweown/paperclip-plugin-feed-watch",
-  "version": "0.1.0",
-  "description": "Disabled-by-default deterministic YouTube feed intake for Paperclip research cards",
+  "version": "0.2.0",
+  "description": "Disabled-by-default deterministic YouTube discovery (RSS/WebSub) issuing stub cards; no caption fetching",
   "license": "MIT",
   "type": "module",
   "engines": {
@@ -26,7 +26,6 @@
   "dependencies": {
     "@paperclipai/plugin-sdk": "2026.1023.0",
     "fast-xml-parser": "5.11.2",
-    "undici": "8.12.3",
     "zod": "4.6.7"
   },
   "devDependencies": {

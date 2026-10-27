@@ -71,8 +71,8 @@ export function createPlugin() {
           const { config, feed } = await watcher(company.id, raw);
           if (!config.enabled) continue;
           const state = await feed.status();
-          const pending = Object.values(state.videos).filter(video => video.stage !== 'research-pending');
-          const blocked = pending.filter(video => video.stage === 'caption-blocked' || video.error).length;
+          const pending = Object.values(state.videos).filter(video => video.stage !== 'stub-created');
+          const blocked = pending.filter(video => video.error).length;
           const stale = !state.lastCheckAt || Date.now() - state.lastCheckAt > 2_700_000;
           const lease = await ctx.state.get({ scopeKind: 'company', scopeId: company.id, namespace: PLUGIN_ID, stateKey: `${config.channelId}:websub-status` });
           summaries[company.id] = { channelId: config.channelId, queueDepth: pending.length, blocked,
