@@ -6,8 +6,7 @@
 version: 1
 default_tier: sensitive
 tiers:
-  low:
-    - LICENSE
+  low: []
   ordinary: []
   sensitive:
     - .github/**
