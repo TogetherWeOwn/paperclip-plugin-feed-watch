@@ -1,0 +1,26 @@
+# The highest matching tier wins; unmatched paths are sensitive. For renames,
+# classify both the old and new paths. These rules are source metadata only.
+# Changes to input parsing, endpoints, auth, crypto, credentials, permissions,
+# tenant or personal data, persistence, schemas, dependencies, CI, or weakened
+# tests and gates are sensitive regardless of path, including prose and tests.
+version: 1
+default_tier: sensitive
+tiers:
+  low:
+    - LICENSE
+  ordinary: []
+  sensitive:
+    - .github/**
+    - .claude/**
+    - AGENTS.md
+    - CLAUDE.md
+    - README.md
+    - package.json
+    - package-lock.json
+    - .npmrc
+    - .dockerignore
+    - build.mjs
+    - tsconfig.json
+    - src/**
+    - cloudflare/**
+    - tests/**
